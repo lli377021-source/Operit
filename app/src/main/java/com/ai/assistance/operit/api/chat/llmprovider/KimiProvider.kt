@@ -25,7 +25,7 @@ open class KimiProvider(
     modelName: String,
     client: OkHttpClient,
     customHeaders: Map<String, String> = emptyMap(),
-    private val providerType: ApiProviderType = ApiProviderType.MOONSHOT,
+    override val providerType: ApiProviderType = ApiProviderType.MOONSHOT,
     supportsVision: Boolean = false,
     supportsAudio: Boolean = false,
     supportsVideo: Boolean = false,
