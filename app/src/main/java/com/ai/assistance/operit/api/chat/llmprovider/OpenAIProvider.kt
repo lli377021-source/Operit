@@ -86,12 +86,12 @@ import com.ai.assistance.operit.api.chat.llmprovider.MediaLinkParser
  * @param enableToolCall 是否启用Tool Call API格式转换（默认false）
  */
 open class OpenAIProvider(
-    private val apiEndpoint: String,
+    protected val apiEndpoint: String,
     private val apiKeyProvider: ApiKeyProvider,
     val modelName: String,
     private val client: OkHttpClient,
     private val customHeaders: Map<String, String> = emptyMap(),
-    private val providerType: ApiProviderType = ApiProviderType.OPENAI,
+    protected val providerType: ApiProviderType = ApiProviderType.OPENAI,
     protected val supportsVision: Boolean = false, // 是否支持图片处理
     protected val supportsAudio: Boolean = false, // 是否支持音频输入
     protected val supportsVideo: Boolean = false, // 是否支持视频输入
@@ -214,7 +214,39 @@ open class OpenAIProvider(
     }
 
     protected open fun convertChatRequestToResponsesRequest(requestObject: JSONObject): JSONObject {
-        return OpenAIResponsesPayloadAdapter.toResponsesRequest(requestObject)
+        val converted = OpenAIResponsesPayloadAdapter.toResponsesRequest(requestObject)
+        if (resolveVideoWireFormat() == MediaWireCapability.VideoWireFormat.VIDEO_URL) {
+            return converted
+        }
+        if (containsResponsesVideoPart(converted)) {
+            AppLogger.w(
+                "AIService",
+                "视频内容块未发送：provider=$providerType model=$modelName 不支持视频输入，" +
+                    "已在请求构建阶段裁剪并写入文字占位（历史消息保持原样，未做任何视频分析）。"
+            )
+        }
+        return MediaWireCapability.stripUnsupportedResponsesVideoParts(
+            request = converted,
+            allowVideo = false,
+            modelName = modelName,
+            providerType = providerType,
+        )
+    }
+
+    /** 当前 Provider + 具体模型是否允许发送视频内容块；未知一律按不允许处理。 */
+    protected fun resolveVideoWireFormat(): MediaWireCapability.VideoWireFormat =
+        MediaWireCapability.resolveVideoWireFormat(providerType, modelName, apiEndpoint)
+
+    private fun containsResponsesVideoPart(request: JSONObject): Boolean {
+        val input = request.optJSONArray("input") ?: return false
+        for (i in 0 until input.length()) {
+            val content = input.optJSONObject(i)?.optJSONArray("content") ?: continue
+            for (j in 0 until content.length()) {
+                val type = content.optJSONObject(j)?.optString("type", "") ?: continue
+                if (type == "input_video" || type == "video_url") return true
+            }
+        }
+        return false
     }
 
     protected open fun createResponsesReasoningMetadataTag(item: JSONObject): String? {
@@ -904,9 +936,22 @@ open class OpenAIProvider(
         val videoLinks = mediaLinks.filter { it.type == "video" }
         val fileLinks = mediaLinks.filter { it.type == "file" }
 
+        // 视频块是否真的能放到请求里：配置开关 + Provider/具体模型能力，未知一律不发
+        val canSendVideoParts =
+            allowUserRichContent &&
+                supportsVideo &&
+                videoLinks.isNotEmpty() &&
+                resolveVideoWireFormat() == MediaWireCapability.VideoWireFormat.VIDEO_URL
+        val videoOmittedNotice =
+            if (videoLinks.isNotEmpty() && !canSendVideoParts) {
+                MediaWireCapability.unsupportedVideoNotice(modelName, providerType)
+            } else {
+                null
+            }
+
         val hasSupportedMedia =
             (supportsAudio && audioLinks.isNotEmpty()) ||
-                (supportsVideo && videoLinks.isNotEmpty()) ||
+                canSendVideoParts ||
                 (supportsFiles && fileLinks.isNotEmpty())
 
         var textWithoutLinks = contentText
@@ -921,12 +966,25 @@ open class OpenAIProvider(
         if (audioLinks.isNotEmpty() && !supportsAudio) {
             AppLogger.w("AIService", "检测到音频链接，但当前Provider不支持音频多模态输入，已移除音频。原始文本长度: ${contentText.length}, 处理后: ${textWithoutLinks.length}")
         }
-        if (videoLinks.isNotEmpty() && !supportsVideo) {
-            AppLogger.w("AIService", "检测到视频链接，但当前Provider不支持视频多模态输入，已移除视频。原始文本长度: ${contentText.length}, 处理后: ${textWithoutLinks.length}")
+        if (videoLinks.isNotEmpty() && !canSendVideoParts) {
+            AppLogger.w(
+                "AIService",
+                "检测到视频链接，但 provider=$providerType model=$modelName 不支持视频输入，" +
+                    "已改用文字占位（历史消息与附件保留，未做任何视频分析）。"
+            )
         }
         if (imageLinks.isNotEmpty() && !supportsVision) {
             AppLogger.w("AIService", "检测到图片链接，但当前Provider不支持图片处理，已移除图片。原始文本长度: ${contentText.length}, 处理后: ${textWithoutLinks.length}")
         }
+
+        // 视频被裁剪时，把明确的"未分析"占位并入文本，避免伪装成看过画面
+        val textForRequest = buildString {
+            if (videoOmittedNotice != null) {
+                append(videoOmittedNotice)
+                if (textWithoutLinks.isNotEmpty()) append("\n\n")
+            }
+            append(textWithoutLinks)
+        }.trim()
 
         val hasAnySupportedRichContent =
             (allowUserRichContent && hasSupportedMedia) ||
@@ -934,7 +992,7 @@ open class OpenAIProvider(
                     supportsVision &&
                     imageLinks.isNotEmpty())
         if (!hasAnySupportedRichContent) {
-            if (textWithoutLinks.isNotEmpty()) return textWithoutLinks
+            if (textForRequest.isNotEmpty()) return textForRequest
 
             return when {
                 audioLinks.isNotEmpty() || videoLinks.isNotEmpty() -> context.getString(R.string.openai_audio_video_omitted)
@@ -955,7 +1013,7 @@ open class OpenAIProvider(
             }
         }
 
-        if (allowUserRichContent && supportsVideo) {
+        if (canSendVideoParts) {
             videoLinks.forEach { link ->
                 contentArray.put(JSONObject().apply {
                     put("type", "video_url")
@@ -991,10 +1049,10 @@ open class OpenAIProvider(
             }
         }
 
-        if (textWithoutLinks.isNotEmpty()) {
+        if (textForRequest.isNotEmpty()) {
             contentArray.put(JSONObject().apply {
                 put("type", "text")
-                put("text", textWithoutLinks)
+                put("text", textForRequest)
             })
         }
 
