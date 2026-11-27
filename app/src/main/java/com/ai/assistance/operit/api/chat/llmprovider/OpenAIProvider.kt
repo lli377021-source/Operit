@@ -91,7 +91,7 @@ open class OpenAIProvider(
     val modelName: String,
     private val client: OkHttpClient,
     private val customHeaders: Map<String, String> = emptyMap(),
-    protected val providerType: ApiProviderType = ApiProviderType.OPENAI,
+    protected open val providerType: ApiProviderType = ApiProviderType.OPENAI,
     protected val supportsVision: Boolean = false, // 是否支持图片处理
     protected val supportsAudio: Boolean = false, // 是否支持音频输入
     protected val supportsVideo: Boolean = false, // 是否支持视频输入
