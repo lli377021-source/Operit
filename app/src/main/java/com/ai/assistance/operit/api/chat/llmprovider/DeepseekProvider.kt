@@ -1295,7 +1295,14 @@ private class DeepseekResponsesProvider(
     }
 
     override fun convertChatRequestToResponsesRequest(requestObject: JSONObject): JSONObject {
-        return DeepseekResponsesPayloadAdapter.toResponsesRequest(requestObject)
+        val converted = DeepseekResponsesPayloadAdapter.toResponsesRequest(requestObject)
+        // DeepSeek 官方接口目前只有 text/image_url/file，官方明确支持视频前永久不发送视频块
+        return MediaWireCapability.stripUnsupportedResponsesVideoParts(
+            request = converted,
+            allowVideo = false,
+            modelName = modelName,
+            providerType = providerType,
+        )
     }
 
     override fun createResponsesReasoningMetadataTag(item: JSONObject): String? {
