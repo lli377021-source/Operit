@@ -17,7 +17,7 @@ class DoubaoAIProvider(
     modelName: String,
     client: OkHttpClient,
     customHeaders: Map<String, String> = emptyMap(),
-    private val providerType: ApiProviderType = ApiProviderType.DOUBAO,
+    override val providerType: ApiProviderType = ApiProviderType.DOUBAO,
     supportsVision: Boolean = false,
     supportsAudio: Boolean = false,
     supportsVideo: Boolean = false,
